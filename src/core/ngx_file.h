@@ -39,6 +39,7 @@ struct ngx_file_s {
 
 
 #define NGX_MAX_PATH_LEVEL  3
+#define NGX_MAX_PATH_LEVEL_LEN       16
 
 
 typedef time_t (*ngx_path_manager_pt) (void *data);
@@ -136,6 +137,8 @@ ngx_int_t ngx_create_temp_file(ngx_file_t *file, ngx_path_t *path,
     ngx_pool_t *pool, ngx_uint_t persistent, ngx_uint_t clean,
     ngx_uint_t access);
 void ngx_create_hashed_filename(ngx_path_t *path, u_char *file, size_t len);
+u_char* ngx_create_levels_only_filename(u_char levels[NGX_MAX_PATH_LEVEL][NGX_MAX_PATH_LEVEL_LEN], u_char *filepath);
+void ngx_create_levels_filename(ngx_str_t* filename, u_char levels[NGX_MAX_PATH_LEVEL][NGX_MAX_PATH_LEVEL_LEN], u_char *filepath);
 ngx_int_t ngx_create_path(ngx_file_t *file, ngx_path_t *path);
 ngx_err_t ngx_create_full_path(u_char *dir, ngx_uint_t access);
 ngx_int_t ngx_add_path(ngx_conf_t *cf, ngx_path_t **slot);

@@ -30,8 +30,6 @@ static void ngx_http_cache_thread_event_handler(ngx_event_t *ev);
 #endif
 static ngx_int_t ngx_http_file_cache_exists(ngx_http_file_cache_t *cache,
     ngx_http_cache_t *c);
-static ngx_int_t ngx_http_file_cache_name(ngx_http_request_t *r,
-    ngx_path_t *path);
 static ngx_http_file_cache_node_t *
     ngx_http_file_cache_lookup(ngx_http_file_cache_t *cache, u_char *key);
 static void ngx_http_file_cache_rbtree_insert_value(ngx_rbtree_node_t *temp,
@@ -62,7 +60,7 @@ static ngx_int_t ngx_http_file_cache_add(ngx_http_file_cache_t *cache,
     ngx_http_cache_t *c);
 static ngx_int_t ngx_http_file_cache_delete_file(ngx_tree_ctx_t *ctx,
     ngx_str_t *path);
-
+static ngx_int_t ngx_http_file_cache_name_len(ngx_path_t* path);
 
 ngx_str_t  ngx_http_cache_status[] = {
     ngx_string("MISS"),
@@ -77,6 +75,28 @@ ngx_str_t  ngx_http_cache_status[] = {
 
 static u_char  ngx_http_file_cache_key[] = { LF, 'K', 'E', 'Y', ':', ' ' };
 
+static ngx_int_t ngx_http_file_cache_name_len(ngx_path_t* path)
+{
+    return path->name.len + 1 + (NGX_MAX_PATH_LEVEL_LEN + 1) * NGX_MAX_PATH_LEVEL + 2 * NGX_HTTP_CACHE_KEY_LEN;
+}
+
+static void ngx_http_file_cache_levels_from_filepath(ngx_path_t* path, ngx_str_t* name, u_char levels[NGX_MAX_PATH_LEVEL][NGX_MAX_PATH_LEVEL_LEN])
+{
+    u_char *last, *d, *p = name->data + path->name.len + 1;
+    ngx_int_t i;
+    
+    ngx_memzero(levels, sizeof(levels));
+
+    last = name->data + name->len - NGX_HTTP_CACHE_KEY_LEN * 2;
+
+    for (i = 0; i < NGX_MAX_PATH_LEVEL && p != last; i++) {
+        d = &levels[i][0];
+        while (*p != '/') {
+            *d++ = *p++;
+        }
+        p++;
+    }
+}
 
 static ngx_int_t
 ngx_http_file_cache_init(ngx_shm_zone_t *shm_zone, void *data)
@@ -169,7 +189,7 @@ ngx_http_file_cache_init(ngx_shm_zone_t *shm_zone, void *data)
 
 
 ngx_int_t
-ngx_http_file_cache_new(ngx_http_request_t *r)
+ngx_http_file_cache_new(ngx_http_request_t *r, ngx_http_file_cache_name_f create_cache_file_name)
 {
     ngx_http_cache_t  *c;
 
@@ -185,10 +205,10 @@ ngx_http_file_cache_new(ngx_http_request_t *r)
     r->cache = c;
     c->file.log = r->connection->log;
     c->file.fd = NGX_INVALID_FILE;
+    c->create_cache_file_name = create_cache_file_name;
 
     return NGX_OK;
 }
-
 
 ngx_int_t
 ngx_http_file_cache_create(ngx_http_request_t *r)
@@ -212,13 +232,12 @@ ngx_http_file_cache_create(ngx_http_request_t *r)
         return NGX_ERROR;
     }
 
-    if (ngx_http_file_cache_name(r, cache->path) != NGX_OK) {
+    if (c->create_cache_file_name(r, cache->path, c->node->path_levels) != NGX_OK) {
         return NGX_ERROR;
     }
 
     return NGX_OK;
 }
-
 
 void
 ngx_http_file_cache_create_key(ngx_http_request_t *r)
@@ -255,7 +274,6 @@ ngx_http_file_cache_create_key(ngx_http_request_t *r)
 
     ngx_memcpy(c->main, c->key, NGX_HTTP_CACHE_KEY_LEN);
 }
-
 
 ngx_int_t
 ngx_http_file_cache_open(ngx_http_request_t *r)
@@ -331,7 +349,7 @@ ngx_http_file_cache_open(ngx_http_request_t *r)
         }
     }
 
-    if (ngx_http_file_cache_name(r, cache->path) != NGX_OK) {
+    if (c->create_cache_file_name(r, cache->path, c->node->path_levels) != NGX_OK) {
         return NGX_ERROR;
     }
 
@@ -860,6 +878,7 @@ ngx_http_file_cache_exists(ngx_http_file_cache_t *cache, ngx_http_cache_t *c)
     }
 
     ngx_memcpy((u_char *) &fcn->node.key, c->key, sizeof(ngx_rbtree_key_t));
+    ngx_memzero(fcn->path_levels, sizeof(fcn->path_levels));  
 
     ngx_memcpy(fcn->key, &c->key[sizeof(ngx_rbtree_key_t)],
                NGX_HTTP_CACHE_KEY_LEN - sizeof(ngx_rbtree_key_t));
@@ -899,11 +918,12 @@ failed:
 }
 
 
-static ngx_int_t
-ngx_http_file_cache_name(ngx_http_request_t *r, ngx_path_t *path)
+ngx_int_t
+ngx_http_file_cache_name_by_hash_levels(ngx_http_request_t *r, ngx_path_t *path, u_char levels[NGX_MAX_PATH_LEVEL][NGX_MAX_PATH_LEVEL_LEN])
 {
-    u_char            *p;
+    u_char            *p, *k;
     ngx_http_cache_t  *c;
+    ngx_int_t n, level, len = NGX_HTTP_CACHE_KEY_LEN * 2;
 
     c = r->cache;
 
@@ -911,21 +931,34 @@ ngx_http_file_cache_name(ngx_http_request_t *r, ngx_path_t *path)
         return NGX_OK;
     }
 
-    c->file.name.len = path->name.len + 1 + path->len
-                       + 2 * NGX_HTTP_CACHE_KEY_LEN;
+    c->file.name.len = path->name.len + 1 + path->len + 2 * NGX_HTTP_CACHE_KEY_LEN;
 
     c->file.name.data = ngx_pnalloc(r->pool, c->file.name.len + 1);
     if (c->file.name.data == NULL) {
         return NGX_ERROR;
     }
 
-    ngx_memcpy(c->file.name.data, path->name.data, path->name.len);
+    p = ngx_cpymem(c->file.name.data, path->name.data, path->name.len);
+    *p++ = '/';
 
-    p = c->file.name.data + path->name.len + 1 + path->len;
+    p = k = p + path->len;
     p = ngx_hex_dump(p, c->key, NGX_HTTP_CACHE_KEY_LEN);
     *p = '\0';
 
-    ngx_create_hashed_filename(path, c->file.name.data, c->file.name.len);
+    if (path->level[0] != 0 && levels[0][0] == '\0') {
+        for (n = 0; n < NGX_MAX_PATH_LEVEL; n++) {
+            level = path->level[n];
+
+            if (level == 0) {
+                break;
+            }
+
+            len -= level;
+            ngx_memcpy(&levels[n][0], &k[len], level);
+        }
+    }
+
+    ngx_create_levels_only_filename(levels, c->file.name.data + path->name.len + 1);
 
     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                    "cache file: \"%s\"", c->file.name.data);
@@ -1270,7 +1303,6 @@ ngx_http_file_cache_set_header(ngx_http_request_t *r, u_char *buf)
     return NGX_OK;
 }
 
-
 static ngx_int_t
 ngx_http_file_cache_update_variant(ngx_http_request_t *r, ngx_http_cache_t *c)
 {
@@ -1312,7 +1344,7 @@ ngx_http_file_cache_update_variant(ngx_http_request_t *r, ngx_http_cache_t *c)
         return NGX_ERROR;
     }
 
-    if (ngx_http_file_cache_name(r, cache->path) != NGX_OK) {
+    if (c->create_cache_file_name(r, cache->path, c->node->path_levels) != NGX_OK) {
         return NGX_ERROR;
     }
 
@@ -1666,7 +1698,6 @@ static time_t
 ngx_http_file_cache_forced_expire(ngx_http_file_cache_t *cache)
 {
     u_char                      *name;
-    size_t                       len;
     time_t                       wait;
     ngx_uint_t                   tries;
     ngx_path_t                  *path;
@@ -1677,9 +1708,7 @@ ngx_http_file_cache_forced_expire(ngx_http_file_cache_t *cache)
                    "http file cache forced expire");
 
     path = cache->path;
-    len = path->name.len + 1 + path->len + 2 * NGX_HTTP_CACHE_KEY_LEN;
-
-    name = ngx_alloc(len + 1, ngx_cycle->log);
+    name = ngx_alloc(ngx_http_file_cache_name_len(path) + 1, ngx_cycle->log);
     if (name == NULL) {
         return 10;
     }
@@ -1738,11 +1767,8 @@ ngx_http_file_cache_expire(ngx_http_file_cache_t *cache)
 
     ngx_log_debug0(NGX_LOG_DEBUG_HTTP, ngx_cycle->log, 0,
                    "http file cache expire");
-
-    path = cache->path;
-    len = path->name.len + 1 + path->len + 2 * NGX_HTTP_CACHE_KEY_LEN;
-
-    name = ngx_alloc(len + 1, ngx_cycle->log);
+    path = cache->path;	
+    name = ngx_alloc(ngx_http_file_cache_name_len(path) + 1, ngx_cycle->log);
     if (name == NULL) {
         return 10;
     }
@@ -1818,13 +1844,33 @@ ngx_http_file_cache_expire(ngx_http_file_cache_t *cache)
     return wait;
 }
 
+void ngx_http_file_cache_create_levels_filename(u_char* node_key, u_char* key, u_char levels[NGX_MAX_PATH_LEVEL][NGX_MAX_PATH_LEVEL_LEN], u_char* path)
+{
+	u_char key_data[NGX_HTTP_CACHE_KEY_LEN * 2 + 1];
+	ngx_str_t key_str = {NGX_HTTP_CACHE_KEY_LEN * 2, key_data};
+	
+	ngx_hex_dump(key_data, node_key, sizeof(ngx_rbtree_key_t));
+	ngx_hex_dump(key_data + sizeof(ngx_rbtree_key_t) * 2, key, NGX_HTTP_CACHE_KEY_LEN - sizeof(ngx_rbtree_key_t));
+	key_data[NGX_HTTP_CACHE_KEY_LEN * 2] = '\0';
+
+	ngx_create_levels_filename(&key_str, levels, path);
+}
+
+void ngx_http_file_cache_create_levels_filename2(u_char* key, u_char levels[NGX_MAX_PATH_LEVEL][NGX_MAX_PATH_LEVEL_LEN], u_char* path)
+{
+	u_char key_data[NGX_HTTP_CACHE_KEY_LEN * 2 + 1];
+	ngx_str_t key_str = { NGX_HTTP_CACHE_KEY_LEN * 2, key_data };
+
+	ngx_hex_dump(key_data, key, NGX_HTTP_CACHE_KEY_LEN);
+	key_data[NGX_HTTP_CACHE_KEY_LEN * 2] = '\0';
+
+	ngx_create_levels_filename(&key_str, levels, path);
+}
 
 static void
-ngx_http_file_cache_delete(ngx_http_file_cache_t *cache, ngx_queue_t *q,
-    u_char *name)
+ngx_http_file_cache_delete(ngx_http_file_cache_t *cache, ngx_queue_t *q, u_char *name)
 {
     u_char                      *p;
-    size_t                       len;
     ngx_path_t                  *path;
     ngx_http_file_cache_node_t  *fcn;
 
@@ -1834,19 +1880,14 @@ ngx_http_file_cache_delete(ngx_http_file_cache_t *cache, ngx_queue_t *q,
         cache->sh->size -= fcn->fs_size;
 
         path = cache->path;
-        p = name + path->name.len + 1 + path->len;
-        p = ngx_hex_dump(p, (u_char *) &fcn->node.key,
-                         sizeof(ngx_rbtree_key_t));
-        len = NGX_HTTP_CACHE_KEY_LEN - sizeof(ngx_rbtree_key_t);
-        p = ngx_hex_dump(p, fcn->key, len);
-        *p = '\0';
+        p = name + path->name.len;
+        *p++ = '/';
 
         fcn->count++;
         fcn->deleting = 1;
         ngx_shmtx_unlock(&cache->shpool->mutex);
 
-        len = path->name.len + 1 + path->len + 2 * NGX_HTTP_CACHE_KEY_LEN;
-        ngx_create_hashed_filename(path, name, len);
+        ngx_http_file_cache_create_levels_filename((u_char*)&fcn->node.key, fcn->key, fcn->path_levels, p);
 
         ngx_log_debug1(NGX_LOG_DEBUG_HTTP, ngx_cycle->log, 0,
                        "http file cache expire: \"%s\"", name);
@@ -2043,6 +2084,7 @@ ngx_http_file_cache_add_file(ngx_tree_ctx_t *ctx, ngx_str_t *name)
 
     c.length = ctx->size;
     c.fs_size = (ctx->fs_size + cache->bsize - 1) / cache->bsize;
+	c.file.name = *name;
 
     p = &name->data[name->len - 2 * NGX_HTTP_CACHE_KEY_LEN];
 
@@ -2096,6 +2138,8 @@ ngx_http_file_cache_add(ngx_http_file_cache_t *cache, ngx_http_cache_t *c)
     } else {
         ngx_queue_remove(&fcn->queue);
     }
+
+	ngx_http_file_cache_levels_from_filepath(cache->path, &c->file.name, fcn->path_levels);
 
     fcn->expire = ngx_time() + cache->inactive;
 
@@ -2435,6 +2479,64 @@ ngx_http_file_cache_set_slot(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     }
 
     *ce = cache;
+
+    return NGX_CONF_OK;
+}
+
+char *
+ngx_http_file_cache_file_cache_path(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    u_char *p = conf;
+    ngx_str_t* a = (ngx_str_t*) (p + cmd->offset);
+    ngx_str_t *s, *value = (ngx_str_t*)cf->args->elts + 1;
+    u_char* begin;
+    u_char* last;
+    ngx_int_t i;
+
+    if (value == NULL || value->data == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    begin = value->data;
+    last = value->data + value->len;
+    p = begin;
+
+    for (i = 0; i < NGX_MAX_PATH_LEVEL && p < last; i++) { 
+        while (1) {
+            if (p == last || *p == '/') {
+                if (p == begin) {
+                    ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "%V: empty path level", cf->args->elts);
+                    return NGX_CONF_ERROR;
+                }
+
+                s = (ngx_str_t*)a + i;
+                s->len = p - begin;
+                p++;
+
+                if (s->len <= 0) {
+                    return NGX_CONF_ERROR;
+                }
+
+                s->data = ngx_pnalloc(cf->pool, s->len + 1);
+                ngx_cpystrn(s->data, begin, s->len + 1);
+
+                if (s->data == NULL) {
+                    return NGX_CONF_ERROR;
+                }
+                
+                begin = p;
+                break;
+            } else {
+                p++;
+            }
+        }
+    }
+
+    if (p < last)
+    {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "%V: too much levels, maximum %d (a/b/c)", cf->args->elts, NGX_MAX_PATH_LEVEL);
+        return NGX_CONF_ERROR;
+    }
 
     return NGX_CONF_OK;
 }
