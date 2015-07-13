@@ -53,6 +53,8 @@ typedef struct {
     time_t                           valid_sec;
     size_t                           body_start;
     off_t                            fs_size;
+
+    u_char                           path_levels[NGX_MAX_PATH_LEVEL][NGX_MAX_PATH_LEVEL_LEN];
 } ngx_http_file_cache_node_t;
 
 
@@ -137,11 +139,16 @@ struct ngx_http_file_cache_s {
     ngx_shm_zone_t                  *shm_zone;
 };
 
-
+typedef ngx_int_t(*ngx_http_file_cache_name_f)(ngx_http_request_t *r, ngx_path_t *path, u_char levels[NGX_MAX_PATH_LEVEL][NGX_MAX_PATH_LEVEL_LEN]);
+void ngx_http_file_cache_create_levels_filename(u_char* node_key, u_char* key, u_char levels[NGX_MAX_PATH_LEVEL][NGX_MAX_PATH_LEVEL_LEN], u_char* path);
+void ngx_http_file_cache_create_levels_filename2(u_char* key, u_char levels[NGX_MAX_PATH_LEVEL][NGX_MAX_PATH_LEVEL_LEN], u_char* path);
+ngx_int_t ngx_http_file_cache_name_by_hash_levels(ngx_http_request_t *r, ngx_path_t *path, u_char levels[NGX_MAX_PATH_LEVEL][NGX_MAX_PATH_LEVEL_LEN]);
 ngx_int_t ngx_http_file_cache_new(ngx_http_request_t *r);
 ngx_int_t ngx_http_file_cache_create(ngx_http_request_t *r);
+ngx_int_t ngx_http_file_cache_create_ex(ngx_http_request_t *r, ngx_http_file_cache_name_f file_cache_name);
 void ngx_http_file_cache_create_key(ngx_http_request_t *r);
 ngx_int_t ngx_http_file_cache_open(ngx_http_request_t *r);
+ngx_int_t ngx_http_file_cache_open_ex(ngx_http_request_t *r, ngx_http_file_cache_name_f file_cache_name);
 void ngx_http_file_cache_set_header(ngx_http_request_t *r, u_char *buf);
 void ngx_http_file_cache_update(ngx_http_request_t *r, ngx_temp_file_t *tf);
 void ngx_http_file_cache_update_header(ngx_http_request_t *r);
@@ -149,7 +156,8 @@ ngx_int_t ngx_http_cache_send(ngx_http_request_t *);
 void ngx_http_file_cache_free(ngx_http_cache_t *c, ngx_temp_file_t *tf);
 time_t ngx_http_file_cache_valid(ngx_array_t *cache_valid, ngx_uint_t status);
 
-char *ngx_http_file_cache_set_slot(ngx_conf_t *cf, ngx_command_t *cmd,
+char *ngx_http_file_cache_set_slot(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
+char *ngx_http_file_cache_file_cache_path(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 char *ngx_http_file_cache_valid_set_slot(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);

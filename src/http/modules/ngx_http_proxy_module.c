@@ -64,6 +64,10 @@ typedef struct {
     ngx_str_t                      location;
     ngx_str_t                      url;
 
+    ngx_str_t                      cache_file_path_levels[NGX_MAX_PATH_LEVEL];
+    ngx_array_t                    *cache_file_path_levels_lengths[NGX_MAX_PATH_LEVEL];
+    ngx_array_t                    *cache_file_path_levels_values[NGX_MAX_PATH_LEVEL];
+
 #if (NGX_HTTP_CACHE)
     ngx_http_complex_value_t       cache_key;
 #endif
@@ -409,6 +413,12 @@ static ngx_command_t  ngx_http_proxy_commands[] = {
       0,
       &ngx_http_proxy_module },
 
+    { ngx_string("proxy_cache_file_path"),
+      NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      ngx_http_file_cache_file_cache_path,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_proxy_loc_conf_t, cache_file_path_levels),
+      NULL },
     { ngx_string("proxy_cache_bypass"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_1MORE,
       ngx_http_set_predicate_slot,
@@ -669,6 +679,65 @@ static ngx_path_init_t  ngx_http_proxy_temp_path = {
     ngx_string(NGX_HTTP_PROXY_TEMP_PATH), { 1, 2, 0 }
 };
 
+static ngx_int_t
+ngx_http_proxy_create_cache_name(ngx_http_request_t *r, ngx_path_t *path, u_char levels[NGX_MAX_PATH_LEVEL][NGX_MAX_PATH_LEVEL_LEN])
+{
+    ngx_http_proxy_loc_conf_t* cf = ngx_http_get_module_loc_conf(r, ngx_http_proxy_module);
+    size_t len = path->name.len + 1 + NGX_HTTP_CACHE_KEY_LEN * 2, i, j, l;
+    u_char *p, *d;
+    
+    if (cf->cache_file_path_levels[0].data == NULL)
+    {
+        return ngx_http_file_cache_name_by_hash_levels(r, path, levels);
+    }
+
+    if (levels[0][0] == '\0') {
+        for (i = 0; i < NGX_MAX_PATH_LEVEL; i++)
+        {
+            ngx_str_t s;
+
+            if (cf->cache_file_path_levels_lengths[i] == NULL) {
+                break;
+            }
+
+            if (ngx_http_script_run(r, &s, cf->cache_file_path_levels_lengths[i]->elts, 0,
+                cf->cache_file_path_levels_values[i]->elts) == NULL)
+            {
+                return NGX_ERROR;
+            }
+
+            l = ngx_min(NGX_MAX_PATH_LEVEL_LEN, s.len);
+            len += ngx_max(1, l) + 1;
+            d = &levels[i][0];
+
+            if (s.len > 0) {
+                p = s.data;
+                for (j = 0; j < l; j++, p++, d++) {
+                    if (*p == '/' || *p == '\\' || *p == '*' || *p == ':' || *p == '<' || *p == '>' || *p < ' ') {
+                        *d = '_';
+                    } else {
+                        *d = *p;
+                    }
+                }
+            } else {
+                levels[i][0] = '_';
+            }
+        }
+    } else {
+        len += NGX_MAX_PATH_LEVEL * (NGX_MAX_PATH_LEVEL_LEN + 1);
+    }
+
+    r->cache->file.name.len = len;
+    r->cache->file.name.data = ngx_pnalloc(r->pool, len + 1);
+
+
+    p = ngx_cpymem(r->cache->file.name.data, path->name.data, path->name.len);
+    *p++ = '/';
+
+    ngx_http_file_cache_create_levels_filename2(r->cache->key, levels, p);
+
+    return NGX_OK;
+}
 
 static ngx_int_t
 ngx_http_proxy_handler(ngx_http_request_t *r)
@@ -712,6 +781,7 @@ ngx_http_proxy_handler(ngx_http_request_t *r)
 
 #if (NGX_HTTP_CACHE)
     u->create_key = ngx_http_proxy_create_key;
+    u->create_cache_name = ngx_http_proxy_create_cache_name;
 #endif
     u->create_request = ngx_http_proxy_create_request;
     u->reinit_request = ngx_http_proxy_reinit_request;
@@ -2477,6 +2547,7 @@ ngx_http_proxy_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_http_core_loc_conf_t   *clcf;
     ngx_http_proxy_rewrite_t   *pr;
     ngx_http_script_compile_t   sc;
+    int i;
 
     if (conf->upstream.store != 0) {
         ngx_conf_merge_value(conf->upstream.store,
@@ -2824,6 +2895,12 @@ ngx_http_proxy_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
         conf->proxy_values = prev->proxy_values;
     }
 
+    if (conf->cache_file_path_levels[0].data == NULL) {
+        for (i = 0; i < NGX_MAX_PATH_LEVEL; i++) {
+            conf->cache_file_path_levels[i] = prev->cache_file_path_levels[i];
+        }
+    }
+
     if (conf->upstream.upstream || conf->proxy_lengths) {
         clcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_core_module);
         if (clcf->handler == NULL && clcf->lmt_excpt) {
@@ -2858,6 +2935,26 @@ ngx_http_proxy_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     if (ngx_http_proxy_merge_headers(cf, conf, prev) != NGX_OK) {
         return NGX_CONF_ERROR;
     }
+
+    if (conf->cache_file_path_levels[0].data != NULL && conf->cache_file_path_levels_lengths[0] == NULL) {
+        for (i = 0; i < NGX_MAX_PATH_LEVEL && conf->cache_file_path_levels[i].data; i++)
+        {
+            ngx_memzero(&sc, sizeof(ngx_http_script_compile_t));
+
+            sc.cf = cf;
+            sc.source = &conf->cache_file_path_levels[i];
+            sc.flushes = &conf->flushes;
+            sc.lengths = &conf->cache_file_path_levels_lengths[i];
+            sc.values = &conf->cache_file_path_levels_values[i];
+            sc.complete_lengths = 1;
+            sc.complete_values = 1;
+
+            if (ngx_http_script_compile(&sc) != NGX_OK) {
+                return NGX_CONF_ERROR;
+            }
+        }
+    }
+
 
     return NGX_CONF_OK;
 }

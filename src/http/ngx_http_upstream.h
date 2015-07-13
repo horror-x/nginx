@@ -303,6 +303,7 @@ struct ngx_http_upstream_s {
 
 #if (NGX_HTTP_CACHE)
     ngx_int_t                      (*create_key)(ngx_http_request_t *r);
+    ngx_int_t                      (*create_cache_name)(ngx_http_request_t *r, ngx_path_t *path, u_char levels[NGX_MAX_PATH_LEVEL][NGX_MAX_PATH_LEVEL_LEN]);
 #endif
     ngx_int_t                      (*create_request)(ngx_http_request_t *r);
     ngx_int_t                      (*reinit_request)(ngx_http_request_t *r);

@@ -230,6 +230,31 @@ ngx_create_hashed_filename(ngx_path_t *path, u_char *file, size_t len)
     }
 }
 
+u_char*
+ngx_create_levels_only_filename(u_char levels[NGX_MAX_PATH_LEVEL][NGX_MAX_PATH_LEVEL_LEN], u_char *filepath)
+{
+    ngx_int_t i;
+    u_char *p = filepath, *l;
+
+    for (i = 0; i < NGX_MAX_PATH_LEVEL; i++) {
+        l = &levels[i][0];
+        if (*l == '\0') {
+            break;
+        }
+
+        p = ngx_cpystrn(p, l, NGX_MAX_PATH_LEVEL_LEN + 1);
+        *p++ = '/';
+    }
+
+    return p;
+}
+
+void
+ngx_create_levels_filename(ngx_str_t* filename, u_char levels[NGX_MAX_PATH_LEVEL][NGX_MAX_PATH_LEVEL_LEN], u_char *filepath) {
+
+    u_char* p = ngx_create_levels_only_filename(levels, filepath);
+    ngx_cpystrn(p, filename->data, filename->len + 1);
+}
 
 ngx_int_t
 ngx_create_path(ngx_file_t *file, ngx_path_t *path)

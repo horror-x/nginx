@@ -750,7 +750,7 @@ ngx_http_upstream_cache(ngx_http_request_t *r, ngx_http_upstream_t *u)
         u->cache_status = NGX_HTTP_CACHE_MISS;
     }
 
-    rc = ngx_http_file_cache_open(r);
+    rc = ngx_http_file_cache_open_ex(r, u->create_cache_name);
 
     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                    "http upstream cache: %i", rc);
@@ -2336,7 +2336,7 @@ ngx_http_upstream_send_response(ngx_http_request_t *r, ngx_http_upstream_t *u)
             r->cache->body_start = u->conf->buffer_size;
             r->cache->file_cache = u->conf->cache->data;
 
-            if (ngx_http_file_cache_create(r) != NGX_OK) {
+            if (ngx_http_file_cache_create_ex(r, u->create_cache_name) != NGX_OK) {
                 ngx_http_upstream_finalize_request(r, u, NGX_ERROR);
                 return;
             }
